@@ -1,6 +1,9 @@
 import json
 import os
+from datetime import datetime
 
+
+# ---------- LOAD MASTER DATA ----------
 
 def load_contract():
     contract_path = os.path.join(os.path.dirname(__file__), "contract.json")
@@ -8,113 +11,147 @@ def load_contract():
         return json.load(f)
 
 
-def detect_hsn_category(vendor_name, pdf_text=""):
+# ---------- SAFE NUMBER PARSER ----------
+
+def safe_float(value):
+    try:
+        if isinstance(value, str):
+            value = value.replace(",", "").strip()
+        return float(value)
+    except:
+        return 0.0
+
+
+# ---------- GST SLAB SELECTION ----------
+
+def get_valid_slabs(invoice_date_str):
+    """
+    If date < 22-09-2025 → Old Slabs
+    If date >= 22-09-2025 → New Slabs
+    """
+
+    OLD_SLABS = [0, 5, 12, 18, 28]
+    NEW_SLABS = [0, 5, 28, 40]
+
+    try:
+        invoice_date = datetime.strptime(invoice_date_str, "%d-%m-%Y")
+        cutoff = datetime.strptime("22-09-2025", "%d-%m-%Y")
+
+        if invoice_date < cutoff:
+            return OLD_SLABS, "OLD"
+        else:
+            return NEW_SLABS, "NEW"
+
+    except:
+        # If date missing or invalid → assume old slabs (safer fallback)
+        return OLD_SLABS, "OLD"
+
+
+# ---------- LOOKUP DECLARED HSN/SAC ----------
+
+def lookup_code(code):
     contract = load_contract()
-    hsn_codes = contract.get("hsn_codes", {})
-    search_text = (vendor_name + " " + pdf_text).lower()
+    master = contract.get("hsn_master", {})
+    return master.get(code)
 
-    best_hsn = None
-    best_description = "General Services"
-    best_gst = 18
-    best_score = 0
 
-    for hsn, data in hsn_codes.items():
-        keywords = data.get("keywords", [])
-        score = 0
-        for keyword in keywords:
-            if keyword.lower() in search_text:
-                score += len(keyword.split())
-        if score > best_score:
-            best_score = score
-            best_hsn = hsn
-            best_description = data["description"]
-            best_gst = data["gst_percent"]
-
-    if not best_hsn:
-        best_hsn = "9983"
-        best_description = "General Services"
-        best_gst = 18
-
-    return best_hsn, best_description, best_gst
-
+# ---------- MAIN AUDIT FUNCTION ----------
 
 def audit_invoice(extracted_fields, pdf_text=""):
-    valid_gst_slabs = [0, 3, 5, 12, 18, 40]
 
     vendor = extracted_fields.get("vendor_name", "").strip()
-    billed_total = float(extracted_fields.get("invoice_total", 0))
-    billed_gst = float(extracted_fields.get("gst_percent", 0))
-    billed_rate = float(extracted_fields.get("rate_per_unit", 0))
-    quantity = float(extracted_fields.get("quantity", 0))
+    invoice_date = extracted_fields.get("invoice_date", "")
 
-    hsn_code, hsn_description, expected_gst = detect_hsn_category(vendor, pdf_text)
+    billed_total = safe_float(extracted_fields.get("invoice_total"))
+    billed_gst = safe_float(extracted_fields.get("gst_percent"))
+    billed_rate = safe_float(extracted_fields.get("rate_per_unit"))
+    quantity = safe_float(extracted_fields.get("quantity"))
+
+    declared_hsn = extracted_fields.get("hsn_code", "").strip()
+    declared_sac = extracted_fields.get("sac_code", "").strip()
+
+    valid_slabs, slab_type = get_valid_slabs(invoice_date)
 
     base_amount = round(billed_rate * quantity, 2)
-    expected_total = round(base_amount + (base_amount * expected_gst / 100), 2)
-    overcharge = round(billed_total - expected_total, 2)
+    gst_amount_billed = round(base_amount * billed_gst / 100, 2)
+    calculated_total = round(base_amount + gst_amount_billed, 2)
 
     reasons = []
+    classification_source = "Arithmetic Validation Only"
+    expected_gst = billed_gst
+    hsn_description = "Not Provided"
 
-    if billed_gst not in valid_gst_slabs:
-        nearest_slab = min(valid_gst_slabs, key=lambda x: abs(x - billed_gst))
+    # ---------- PRIORITY 1: DECLARED HSN ----------
+    if declared_hsn:
+        code_data = lookup_code(declared_hsn)
+        if code_data:
+            expected_gst = code_data["gst_percent"]
+            hsn_description = code_data["description"]
+            classification_source = f"Declared HSN ({declared_hsn})"
+
+        else:
+            reasons.append(f"Declared HSN {declared_hsn} not found in master data")
+
+    # ---------- PRIORITY 2: DECLARED SAC ----------
+    elif declared_sac:
+        code_data = lookup_code(declared_sac)
+        if code_data:
+            expected_gst = code_data["gst_percent"]
+            hsn_description = code_data["description"]
+            classification_source = f"Declared SAC ({declared_sac})"
+
+        else:
+            reasons.append(f"Declared SAC {declared_sac} not found in master data")
+
+    # ---------- GST SLAB VALIDATION ----------
+    if billed_gst not in valid_slabs:
         reasons.append(
-            f"GST {billed_gst}% is not a valid 2026 Indian GST slab "
-            f"(Valid: 0%, 3%, 5%, 12%, 18%, 40%). Nearest: {nearest_slab}%"
+            f"GST {billed_gst}% is not valid under {slab_type} slab regime "
+            f"(Valid slabs: {valid_slabs})"
         )
-        corrected_total = round(base_amount + (base_amount * nearest_slab / 100), 2)
-        overcharge = round(billed_total - corrected_total, 2)
-        expected_total = corrected_total
-        expected_gst = nearest_slab
 
-    elif billed_gst != expected_gst:
+    # ---------- GST MISMATCH ----------
+    if declared_hsn or declared_sac:
+        if billed_gst != expected_gst:
+            reasons.append(
+                f"GST applied {billed_gst}% but code requires {expected_gst}%"
+            )
+
+    # ---------- ARITHMETIC VALIDATION ----------
+    if abs(calculated_total - billed_total) > 1:
         reasons.append(
-            f"GST applied {billed_gst}% but HSN {hsn_code} "
-            f"({hsn_description}) should attract {expected_gst}% "
-            f"as per 2026 GST rules"
+            f"Invoice total mismatch. Expected ₹{calculated_total}, "
+            f"but billed ₹{billed_total}"
         )
 
-    if abs(overcharge) > 1 and not reasons:
-        reasons.append(
-            f"Invoice total Rs{billed_total} doesnt match "
-            f"calculated total Rs{expected_total} "
-            f"(rate x qty + GST)"
-        )
+    overcharge = max(round(billed_total - calculated_total, 2), 0)
 
-    if not reasons and abs(overcharge) <= 1:
-        return {
-            "status": "correct",
-            "vendor": vendor,
-            "hsn_code": hsn_code,
-            "hsn_description": hsn_description,
-            "billed_total": billed_total,
-            "expected_total": expected_total,
-            "overcharge": 0,
-            "billed_gst": billed_gst,
-            "expected_gst": expected_gst,
-            "billed_rate": billed_rate,
-            "expected_rate": billed_rate,
-            "quantity": quantity,
-            "reason": f"Invoice is correct. GST {billed_gst}% is valid for HSN {hsn_code} - {hsn_description}.",
-            "base_amount": base_amount,
-            "gst_amount_expected": round(base_amount * expected_gst / 100, 2),
-            "gst_amount_billed": round(base_amount * billed_gst / 100, 2)
-        }
+    # ---------- FINAL RESULT ----------
+    if not reasons:
+        status = "correct"
+        reason_text = "Invoice is mathematically correct and GST slab valid."
     else:
-        return {
-            "status": "overcharged",
-            "vendor": vendor,
-            "hsn_code": hsn_code,
-            "hsn_description": hsn_description,
-            "billed_total": billed_total,
-            "expected_total": expected_total,
-            "overcharge": max(overcharge, 0),
-            "billed_gst": billed_gst,
-            "expected_gst": expected_gst,
-            "billed_rate": billed_rate,
-            "expected_rate": billed_rate,
-            "quantity": quantity,
-            "reason": " | ".join(reasons),
-            "base_amount": base_amount,
-            "gst_amount_expected": round(base_amount * expected_gst / 100, 2),
-            "gst_amount_billed": round(base_amount * billed_gst / 100, 2)
-        }
+        status = "overcharged"
+        reason_text = " | ".join(reasons)
+
+    return {
+        "status": status,
+        "vendor": vendor,
+        "invoice_date": invoice_date,
+        "slab_regime": slab_type,
+        "classification_source": classification_source,
+        "hsn_code": declared_hsn or declared_sac or "N/A",
+        "hsn_description": hsn_description,
+        "billed_total": billed_total,
+        "expected_total": calculated_total,
+        "overcharge": overcharge,
+        "billed_gst": billed_gst,
+        "expected_gst": expected_gst,
+        "billed_rate": billed_rate,
+        "expected_rate": billed_rate,
+        "quantity": quantity,
+        "reason": reason_text,
+        "base_amount": base_amount,
+        "gst_amount_expected": gst_amount_billed,
+        "gst_amount_billed": gst_amount_billed
+    }
