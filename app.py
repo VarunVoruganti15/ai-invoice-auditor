@@ -97,6 +97,18 @@ if uploaded_file:
             metric("Overcharge", f"₹{result['overcharge']:,.2f}")
 
         st.warning(result["reason"])
+    elif result["status"] == "warning":
+        st.warning("Invoice is financially correct but requires review ⚠️")
+
+        col1, col2, col3 = st.columns(3)
+        with col1:
+          metric("Billed Total", f"₹{result['billed_total']:,.2f}")
+        with col2:
+          metric("Expected Total", f"₹{result['expected_total']:,.2f}")
+        with col3:
+          metric("Overcharge", "₹0.00")
+
+        st.info(result["reason"])
 
         st.divider()
         st.subheader("Detailed Breakdown")
