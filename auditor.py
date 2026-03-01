@@ -76,7 +76,7 @@ def audit_invoice(extracted_fields, pdf_text=""):
 # If taxable amount available, trust it
     if taxable_amount > 0:
        base_amount = round(taxable_amount, 2)
-     else:
+    else:
          base_amount = round(billed_rate * quantity, 2)
 
     if gst_amount_declared > 0:
