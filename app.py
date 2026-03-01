@@ -1,3 +1,4 @@
+import pandas as pd
 import streamlit as st
 import datetime
 from extractor import extract_text_from_pdf, extract_invoice_fields
@@ -31,6 +32,60 @@ st.title("AI Invoice Auditor")
 st.caption("Upload invoice → Automatic Audit → Pay / Hold / Reject Decision")
 
 # -----------------------------
+# SIDEBAR — COMPANY CONFIG
+# -----------------------------
+st.sidebar.header("Company Configuration")
+
+buyer_gstin = st.sidebar.text_input(
+    "Enter Buyer GSTIN",
+    value="27ABCDE1234F1Z5"
+)
+
+st.session_state.buyer_gstin = buyer_gstin
+
+# -----------------------------
+# SIDEBAR — MASTER UPLOADS
+# -----------------------------
+st.sidebar.header("Master Data Upload")
+
+vendor_file = st.sidebar.file_uploader(
+    "Upload Vendor Master CSV",
+    type=["csv"],
+    key="vendor_master"
+)
+
+contract_file = st.sidebar.file_uploader(
+    "Upload Contract Master CSV",
+    type=["csv"],
+    key="contract_master"
+)
+
+if vendor_file:
+    df_vendor = pd.read_csv(vendor_file)
+    required_vendor_cols = {"vendor_name", "gstin", "state", "payment_terms"}
+    if not required_vendor_cols.issubset(set(df_vendor.columns)):
+        st.sidebar.error("Invalid Vendor Master format.")
+    else:
+        st.session_state.vendor_master = df_vendor
+        st.sidebar.success("Vendor Master Loaded")
+
+if contract_file:
+    df_contract = pd.read_csv(contract_file)
+    required_contract_cols = {
+        "vendor_name",
+        "item_description",
+        "agreed_rate",
+        "allowed_charges",
+        "gst_allowed",
+        "tolerance_percent"
+    }
+    if not required_contract_cols.issubset(set(df_contract.columns)):
+        st.sidebar.error("Invalid Contract Master format.")
+    else:
+        st.session_state.contract_master = df_contract
+        st.sidebar.success("Contract Master Loaded")
+
+# -----------------------------
 # DASHBOARD
 # -----------------------------
 history = st.session_state.invoice_history
@@ -56,9 +111,6 @@ st.divider()
 # FILE UPLOAD
 # -----------------------------
 uploaded_file = st.file_uploader("Upload Invoice (PDF)", type=["pdf"])
-
-def metric(label, value):
-    st.metric(label, value)
 
 if uploaded_file:
 
@@ -86,28 +138,31 @@ if uploaded_file:
     col1, col2, col3, col4, col5 = st.columns(5)
     col1.metric("Invoice Number", fields.get("invoice_number", "N/A"))
     col2.metric("Vendor", fields.get("vendor_name", "N/A"))
-    col3.metric("Invoice Date", fields.get("invoice_date", "N/A"))
-    col4.metric("GST %", f"{fields.get('gst_percent', 0)}%")
-    col5.metric("Invoice Total", f"₹{fields.get('invoice_total', 0):,.2f}")
+    col3.metric("Vendor State", fields.get("vendor_state", "N/A"))
+    col4.metric("Invoice Date", fields.get("invoice_date", "N/A"))
+    col5.metric("GST %", f"{fields.get('gst_percent', 0)}%")
 
-    col6, col7 = st.columns(2)
-    col6.metric("Rate per Unit", f"₹{fields.get('rate_per_unit', 0):,.2f}")
-    col7.metric("Quantity", fields.get("quantity", 0))
+    col6, col7, col8 = st.columns(3)
+    col6.metric("CGST Amount", f"₹{fields.get('cgst_amount', 0):,.2f}")
+    col7.metric("SGST Amount", f"₹{fields.get('sgst_amount', 0):,.2f}")
+    col8.metric("IGST Amount", f"₹{fields.get('igst_amount', 0):,.2f}")
+
+    col9, col10 = st.columns(2)
+    col9.metric("Invoice Total", f"₹{fields.get('invoice_total', 0):,.2f}")
+    col10.metric("Taxable Amount", f"₹{fields.get('taxable_amount', 0):,.2f}")
 
     st.divider()
 
     # STEP 3 — CORE AUDIT
-    with st.spinner("Running audit engine..."):
-        result = audit_invoice(fields, pdf_text)
+    result = audit_invoice(fields, st.session_state.buyer_gstin)
 
-    # -----------------------------
-    # INTELLIGENCE LAYER (PHASE 1)
-    # -----------------------------
     invoice_number = fields.get("invoice_number", "")
     vendor = result.get("vendor", "")
     amount = result.get("billed_total", 0)
 
-    # Duplicate — Exact
+    # -----------------------------
+    # PHASE 1 INTELLIGENCE
+    # -----------------------------
     if invoice_number and detect_exact_duplicate(invoice_number, history):
         result["issues"].append({
             "type": "CRITICAL",
@@ -117,44 +172,38 @@ if uploaded_file:
         result["status"] = "FAIL"
         result["recommendation"] = "REJECT"
 
-    # Duplicate — Vendor + Amount
     elif detect_vendor_amount_duplicate(vendor, amount, history):
         result["issues"].append({
             "type": "WARNING",
-            "message": "Repeated identical billing detected for vendor.",
+            "message": "Repeated identical billing detected.",
             "impact": 0
         })
         if result["status"] == "PASS":
             result["status"] = "WARNING"
             result["recommendation"] = "REVIEW"
 
-    # Suspicious Rounding
     if detect_suspicious_rounding(amount):
         result["issues"].append({
             "type": "WARNING",
             "message": "Suspicious rounding pattern detected.",
             "impact": 0
         })
-        if result["status"] == "PASS":
-            result["status"] = "WARNING"
-            result["recommendation"] = "REVIEW"
 
-    # Rate Spike
     spike_detected, spike_percent = detect_rate_spike(vendor, amount, history)
     if spike_detected:
         result["issues"].append({
             "type": "WARNING",
-            "message": f"Invoice amount is {spike_percent}% higher than vendor average.",
+            "message": f"Invoice amount {spike_percent}% higher than vendor average.",
             "impact": 0
         })
-        if result["status"] == "PASS":
-            result["status"] = "WARNING"
-            result["recommendation"] = "REVIEW"
 
-    # Track Money Saved
-    st.session_state.money_saved += result.get("overcharge", 0)
+    # -----------------------------
+    # MONEY SAVED
+    # -----------------------------
+    total_impact = sum(issue.get("impact", 0) for issue in result["issues"])
+    st.session_state.money_saved += total_impact
 
-    # Store Invoice in Session
+    # STORE HISTORY
     st.session_state.invoice_history.append({
         "invoice_number": invoice_number,
         "vendor": vendor,
@@ -163,94 +212,55 @@ if uploaded_file:
     })
 
     # -----------------------------
-    # DISPLAY RESULTS
+    # DISPLAY BUYER & VENDOR STATE
+    # -----------------------------
+    st.write("Buyer State (Derived from GSTIN):", result.get("buyer_state", "Unknown"))
+    st.write("Vendor State:", result.get("vendor_state", "Unknown"))
+
+    st.divider()
+
+    # -----------------------------
+    # DISPLAY RESULT
     # -----------------------------
     st.subheader("Audit Result")
 
-    st.write("**Slab Regime Applied:**", result.get("slab_regime", "N/A"))
-    st.write("**Classification Source:**", result.get("classification_source", "N/A"))
-    st.write("**HSN/SAC Code:**", result.get("hsn_code", "N/A"))
-    st.write("**Description:**", result.get("hsn_description", "N/A"))
-
-    st.divider()
-
-    status = result["status"]
-    recommendation = result.get("recommendation", "")
-
-    if status == "PASS":
+    if result["status"] == "PASS":
         st.success("PASS ✅ — Invoice Cleared")
-    elif status == "WARNING":
+    elif result["status"] == "WARNING":
         st.warning("WARNING ⚠️ — Review Recommended")
-    elif status == "FAIL":
+    else:
         st.error("FAIL ❌ — Financial Risk Detected")
 
-    st.write(f"**Recommendation:** {recommendation}")
+    st.write(f"Recommendation: {result['recommendation']}")
 
     st.divider()
 
-    col1, col2, col3 = st.columns(3)
-    col1.metric("Billed Total", f"₹{result['billed_total']:,.2f}")
-    col2.metric("Calculated Total", f"₹{result['expected_total']:,.2f}")
-    col3.metric("Overcharge", f"₹{result['overcharge']:,.2f}")
+    # Financial Impact
+    if total_impact > 0:
+        st.error(f"Potential Financial Leakage Detected: ₹{total_impact:,.2f}")
 
-    st.divider()
-
-    st.subheader("Audit Findings")
-
+    # Risk Score
+    risk_score = 0
     for issue in result["issues"]:
         if issue["type"] == "CRITICAL":
-            st.error(f"CRITICAL: {issue['message']}")
+            risk_score += 30
         elif issue["type"] == "WARNING":
-            st.warning(f"WARNING: {issue['message']}")
+            risk_score += 10
+
+    risk_score = min(risk_score, 100)
+
+    st.subheader("Invoice Risk Score")
+    st.progress(risk_score / 100)
+    st.write(f"Risk Score: {risk_score}/100")
+
+    st.divider()
+
+    # Findings
+    st.subheader("Audit Findings")
+    for issue in result["issues"]:
+        if issue["type"] == "CRITICAL":
+            st.error(issue["message"])
+        elif issue["type"] == "WARNING":
+            st.warning(issue["message"])
         else:
-            st.info(f"INFO: {issue['message']}")
-
-    st.divider()
-
-    st.subheader("Calculation Breakdown")
-    st.write("Base Amount:", f"₹{result['base_amount']:,.2f}")
-    st.write("GST (Billed):", f"{result['billed_gst']}%")
-    st.write("GST Amount (Billed):", f"₹{result['gst_amount_billed']:,.2f}")
-    st.write("GST Amount (Expected):", f"₹{result['gst_amount_expected']:,.2f}")
-
-    st.divider()
-
-    # -----------------------------
-    # DOWNLOAD REPORT
-    # -----------------------------
-    now = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-
-    findings_text = "\n".join(
-        [f"{issue['type']}: {issue['message']}" for issue in result["issues"]]
-    )
-
-    report = f"""
-AI INVOICE AUDIT REPORT
-Generated On: {now}
-File: {uploaded_file.name}
-
-Vendor: {result['vendor']}
-Invoice Date: {result.get('invoice_date','')}
-Slab Regime: {result.get('slab_regime','')}
-Classification Source: {result.get('classification_source','')}
-
-HSN/SAC Code: {result.get('hsn_code','N/A')}
-Description: {result.get('hsn_description','N/A')}
-
-Status: {status}
-Recommendation: {recommendation}
-
-Billed Total: ₹{result['billed_total']:,.2f}
-Calculated Total: ₹{result['expected_total']:,.2f}
-Overcharge: ₹{result['overcharge']:,.2f}
-
-Audit Findings:
-{findings_text}
-"""
-
-    st.download_button(
-        label="Download Audit Report",
-        data=report,
-        file_name=f"audit_report_{uploaded_file.name.replace('.pdf','')}.txt",
-        mime="text/plain"
-    )
+            st.info(issue["message"])

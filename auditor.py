@@ -2,20 +2,57 @@ import datetime
 import json
 import os
 
+# -----------------------------
+# GST STATE CODE MAPPING
+# -----------------------------
+GST_STATE_CODES = {
+    "01": "Jammu & Kashmir",
+    "02": "Himachal Pradesh",
+    "03": "Punjab",
+    "04": "Chandigarh",
+    "05": "Uttarakhand",
+    "06": "Haryana",
+    "07": "Delhi",
+    "08": "Rajasthan",
+    "09": "Uttar Pradesh",
+    "10": "Bihar",
+    "11": "Sikkim",
+    "12": "Arunachal Pradesh",
+    "13": "Nagaland",
+    "14": "Manipur",
+    "15": "Mizoram",
+    "16": "Tripura",
+    "17": "Meghalaya",
+    "18": "Assam",
+    "19": "West Bengal",
+    "20": "Jharkhand",
+    "21": "Odisha",
+    "22": "Chhattisgarh",
+    "23": "Madhya Pradesh",
+    "24": "Gujarat",
+    "27": "Maharashtra",
+    "29": "Karnataka",
+    "30": "Goa",
+    "32": "Kerala",
+    "33": "Tamil Nadu",
+    "36": "Telangana",
+    "37": "Andhra Pradesh"
+}
 
-# -----------------------------
-# SAFE FLOAT
-# -----------------------------
+
+def get_state_from_gstin(gstin):
+    if gstin and len(gstin) >= 2:
+        return GST_STATE_CODES.get(gstin[:2], "")
+    return ""
+
+
 def safe_float(value):
     try:
         return float(value)
-    except (TypeError, ValueError):
+    except:
         return 0.0
 
 
-# -----------------------------
-# GST SLAB LOGIC
-# -----------------------------
 def get_valid_slabs(invoice_date):
     old_slabs = [0, 3, 5, 12, 18, 40]
     new_slabs = [0, 5, 28, 40]
@@ -23,7 +60,6 @@ def get_valid_slabs(invoice_date):
     try:
         date_obj = datetime.datetime.strptime(invoice_date, "%d-%m-%Y")
         cutoff = datetime.datetime(2025, 9, 22)
-
         if date_obj < cutoff:
             return old_slabs, "OLD"
         else:
@@ -32,128 +68,105 @@ def get_valid_slabs(invoice_date):
         return old_slabs, "OLD"
 
 
-# -----------------------------
-# HSN / SAC LOOKUP
-# -----------------------------
-def lookup_code(code):
-    try:
-        master_path = os.path.join(os.path.dirname(__file__), "gst_rate_master.json")
-        with open(master_path, "r") as f:
-            master = json.load(f)
+def audit_invoice(extracted_fields, buyer_gstin):
 
-        gst_rate = master.get(code)
-
-        if gst_rate is not None:
-            return "GST Master Rate Applied", gst_rate
-
-    except:
-        pass
-
-    return None, None
-
-
-# -----------------------------
-# MAIN AUDIT ENGINE
-# -----------------------------
-def audit_invoice(extracted_fields, pdf_text=""):
-
-    vendor = extracted_fields.get("vendor_name", "").strip()
+    vendor = extracted_fields.get("vendor_name", "")
     invoice_date = extracted_fields.get("invoice_date", "")
 
-    billed_total = safe_float(extracted_fields.get("invoice_total"))
-    billed_gst = safe_float(extracted_fields.get("gst_percent"))
-    billed_rate = safe_float(extracted_fields.get("rate_per_unit"))
-    quantity = safe_float(extracted_fields.get("quantity"))
+    buyer_state = get_state_from_gstin(buyer_gstin)
+    vendor_state = extracted_fields.get("vendor_state", "").strip()
 
-    declared_hsn = extracted_fields.get("hsn_code", "").strip()
-    declared_sac = extracted_fields.get("sac_code", "").strip()
+    billed_total = safe_float(extracted_fields.get("invoice_total"))
+    taxable_amount = safe_float(extracted_fields.get("taxable_amount"))
+    billed_gst_percent = safe_float(extracted_fields.get("gst_percent"))
+
+    cgst = safe_float(extracted_fields.get("cgst_amount"))
+    sgst = safe_float(extracted_fields.get("sgst_amount"))
+    igst = safe_float(extracted_fields.get("igst_amount"))
+
+    rate = safe_float(extracted_fields.get("rate_per_unit"))
+    quantity = safe_float(extracted_fields.get("quantity"))
 
     valid_slabs, slab_type = get_valid_slabs(invoice_date)
 
-    taxable_amount = safe_float(extracted_fields.get("taxable_amount"))
-    gst_amount_declared = safe_float(extracted_fields.get("gst_amount"))
-
-# If taxable amount available, trust it
-    if taxable_amount > 0:
-       base_amount = round(taxable_amount, 2)
-    else:
-         base_amount = round(billed_rate * quantity, 2)
-
-    if gst_amount_declared > 0:
-        gst_amount_billed = round(gst_amount_declared, 2)
-    else:
-        gst_amount_billed = round(base_amount * billed_gst / 100, 2)
-
-    calculated_total = round(base_amount + gst_amount_billed, 2)
-
-    
-
     issues = []
-    classification_source = "Arithmetic Validation Only"
-    expected_gst = billed_gst
-    hsn_description = "Not Provided"
 
-    code_used = declared_hsn or declared_sac
+    base_amount = taxable_amount if taxable_amount > 0 else rate * quantity
+    base_amount = round(base_amount, 2)
 
-    # HSN / SAC validation
-    if code_used:
-        desc, gst_rate = lookup_code(code_used)
+    total_gst_billed = round(cgst + sgst + igst, 2)
+    calculated_total = round(base_amount + total_gst_billed, 2)
 
-        if desc:
-            hsn_description = desc
-            classification_source = f"Declared Code ({code_used})"
+    # -----------------------------
+    # GST SLAB VALIDATION
+    # -----------------------------
+    if billed_gst_percent not in valid_slabs:
+        issues.append({
+            "type": "CRITICAL",
+            "message": f"GST {billed_gst_percent}% invalid under {slab_type} regime.",
+            "impact": 0
+        })
+
+    # -----------------------------
+    # GST STRUCTURE VALIDATION
+    # -----------------------------
+    if buyer_state and vendor_state:
+        same_state = vendor_state.lower() == buyer_state.lower()
+
+        if same_state:
+            if igst > 0:
+                issues.append({
+                    "type": "CRITICAL",
+                    "message": "IGST applied for intra-state transaction.",
+                    "impact": 0
+                })
+            if cgst == 0 or sgst == 0:
+                issues.append({
+                    "type": "CRITICAL",
+                    "message": "CGST and SGST required for intra-state transaction.",
+                    "impact": 0
+                })
         else:
-            issues.append({
-                "type": "INFO",
-                "message": f"Code {code_used} not found in master. Basic GST validation applied.",
-                "impact": 0
-            })
+            if igst == 0:
+                issues.append({
+                    "type": "CRITICAL",
+                    "message": "IGST required for inter-state transaction.",
+                    "impact": 0
+                })
+            if cgst > 0 or sgst > 0:
+                issues.append({
+                    "type": "CRITICAL",
+                    "message": "CGST/SGST applied for inter-state transaction.",
+                    "impact": 0
+                })
 
-        if gst_rate is not None:
-            expected_gst = gst_rate
+    # -----------------------------
+    # GST PERCENT VALIDATION
+    # -----------------------------
+    expected_gst_amount = round(base_amount * billed_gst_percent / 100, 2)
 
-    # GST slab validation
-    if billed_gst not in valid_slabs:
+    if abs(total_gst_billed - expected_gst_amount) > 1:
         issues.append({
             "type": "CRITICAL",
-            "message": f"GST {billed_gst}% not valid under {slab_type} regime.",
+            "message": "GST breakup does not match GST percentage.",
             "impact": 0
         })
 
-    if code_used and expected_gst != billed_gst:
-        issues.append({
-            "type": "CRITICAL",
-            "message": f"GST applied {billed_gst}% but expected {expected_gst}%.",
-            "impact": 0
-        })
-
-    # Math validation
+    # -----------------------------
+    # TOTAL VALIDATION
+    # -----------------------------
     if abs(calculated_total - billed_total) > 1:
-        impact = round(billed_total - calculated_total, 2)
+        impact = max(round(billed_total - calculated_total, 2), 0)
         issues.append({
             "type": "CRITICAL",
-            "message": f"Invoice total mismatch. Expected ₹{calculated_total}, billed ₹{billed_total}.",
-            "impact": max(impact, 0)
+            "message": "Invoice total mismatch.",
+            "impact": impact
         })
 
     overcharge = max(round(billed_total - calculated_total, 2), 0)
 
-    # Decision engine
-    critical_exists = any(i["type"] == "CRITICAL" for i in issues)
-    warning_exists = any(i["type"] == "WARNING" for i in issues)
-
-    if critical_exists and overcharge > 1:
-        status = "FAIL"
-        recommendation = "REJECT"
-    elif critical_exists:
-        status = "FAIL"
-        recommendation = "HOLD"
-    elif warning_exists:
-        status = "WARNING"
-        recommendation = "REVIEW"
-    else:
-        status = "PASS"
-        recommendation = "PAY"
+    status = "FAIL" if any(i["type"] == "CRITICAL" for i in issues) else "PASS"
+    recommendation = "REJECT" if status == "FAIL" else "PAY"
 
     if not issues:
         issues.append({
@@ -167,19 +180,11 @@ def audit_invoice(extracted_fields, pdf_text=""):
         "recommendation": recommendation,
         "vendor": vendor,
         "invoice_date": invoice_date,
-        "slab_regime": slab_type,
-        "classification_source": classification_source,
-        "hsn_code": code_used or "N/A",
-        "hsn_description": hsn_description,
+        "buyer_state": buyer_state,
+        "vendor_state": vendor_state,
         "billed_total": billed_total,
         "expected_total": calculated_total,
         "overcharge": overcharge,
-        "billed_gst": billed_gst,
-        "expected_gst": expected_gst,
-        "billed_rate": billed_rate,
-        "quantity": quantity,
         "issues": issues,
-        "base_amount": base_amount,
-        "gst_amount_expected": round(base_amount * expected_gst / 100, 2),
-        "gst_amount_billed": gst_amount_billed
+        "base_amount": base_amount
     }
