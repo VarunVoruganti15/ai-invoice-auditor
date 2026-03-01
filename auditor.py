@@ -1,108 +1,60 @@
-import os
+import datetime
 import json
-import pandas as pd
-from datetime import datetime
+import os
 
 
-# ---------- SAFE FLOAT ----------
-
+# -----------------------------
+# SAFE FLOAT
+# -----------------------------
 def safe_float(value):
     try:
-        if isinstance(value, str):
-            value = value.replace(",", "").strip()
         return float(value)
-    except:
+    except (TypeError, ValueError):
         return 0.0
 
 
-# ---------- LOAD EXCEL CODE MASTER ----------
-
-def load_excel_codes():
-    base_path = os.path.dirname(__file__)
-    path = os.path.join(base_path, "gst_master.xlsx")
-
-    codes = {}
-
-    if not os.path.exists(path):
-        return codes
-
-    # Load HSN sheet
-    hsn_df = pd.read_excel(path, sheet_name="HSN_MSTR")
-    for _, row in hsn_df.iterrows():
-        code = str(row["HSN_CD"]).strip()
-        description = str(row["HSN_Description"]).strip()
-        codes[code] = description
-
-    # Load SAC sheet
-    sac_df = pd.read_excel(path, sheet_name="SAC_MSTR")
-    for _, row in sac_df.iterrows():
-        code = str(row["SAC_CD"]).strip()
-        description = str(row["SAC_Description"]).strip()
-        codes[code] = description
-
-    return codes
-
-
-# ---------- LOAD GST RATE MASTER ----------
-
-def load_gst_rates():
-    base_path = os.path.dirname(__file__)
-    path = os.path.join(base_path, "gst_rate_master.json")
-
-    if os.path.exists(path):
-        with open(path, "r") as f:
-            return json.load(f)
-
-    return {}
-
-
-EXCEL_CODES = load_excel_codes()
-GST_RATES = load_gst_rates()
-
-
-# ---------- GST SLABS ----------
-
-def get_valid_slabs(invoice_date_str):
-    OLD_SLABS = [0, 5, 12, 18, 28]
-    NEW_SLABS = [0, 5, 28, 40]
+# -----------------------------
+# GST SLAB LOGIC
+# -----------------------------
+def get_valid_slabs(invoice_date):
+    old_slabs = [0, 3, 5, 12, 18, 40]
+    new_slabs = [0, 5, 28, 40]
 
     try:
-        invoice_date = datetime.strptime(invoice_date_str, "%d-%m-%Y")
-        cutoff = datetime.strptime("22-09-2025", "%d-%m-%Y")
+        date_obj = datetime.datetime.strptime(invoice_date, "%d-%m-%Y")
+        cutoff = datetime.datetime(2025, 9, 22)
 
-        if invoice_date < cutoff:
-            return OLD_SLABS, "OLD"
+        if date_obj < cutoff:
+            return old_slabs, "OLD"
         else:
-            return NEW_SLABS, "NEW"
+            return new_slabs, "NEW"
     except:
-        return OLD_SLABS, "OLD"
+        return old_slabs, "OLD"
 
 
-# ---------- LOOKUP ----------
-
+# -----------------------------
+# HSN / SAC LOOKUP
+# -----------------------------
 def lookup_code(code):
-    if not code:
-        return None, None
+    try:
+        master_path = os.path.join(os.path.dirname(__file__), "gst_rate_master.json")
+        with open(master_path, "r") as f:
+            master = json.load(f)
 
-    code = str(code).strip()
+        gst_rate = master.get(code)
 
-    if code in EXCEL_CODES:
-        desc = EXCEL_CODES[code]
-        gst = GST_RATES.get(code[:4])  # match 4-digit GST mapping
-        return desc, gst
+        if gst_rate is not None:
+            return "GST Master Rate Applied", gst_rate
 
-    if len(code) >= 4:
-        short_code = code[:4]
-        if short_code in EXCEL_CODES:
-            desc = EXCEL_CODES[short_code]
-            gst = GST_RATES.get(short_code)
-            return desc, gst
+    except:
+        pass
 
     return None, None
 
 
-# ---------- MAIN AUDIT ----------
-
+# -----------------------------
+# MAIN AUDIT ENGINE
+# -----------------------------
 def audit_invoice(extracted_fields, pdf_text=""):
 
     vendor = extracted_fields.get("vendor_name", "").strip()
@@ -118,17 +70,32 @@ def audit_invoice(extracted_fields, pdf_text=""):
 
     valid_slabs, slab_type = get_valid_slabs(invoice_date)
 
-    base_amount = round(billed_rate * quantity, 2)
-    gst_amount_billed = round(base_amount * billed_gst / 100, 2)
+    taxable_amount = safe_float(extracted_fields.get("taxable_amount"))
+    gst_amount_declared = safe_float(extracted_fields.get("gst_amount"))
+
+# If taxable amount available, trust it
+    if taxable_amount > 0:
+       base_amount = round(taxable_amount, 2)
+     else:
+         base_amount = round(billed_rate * quantity, 2)
+
+    if gst_amount_declared > 0:
+        gst_amount_billed = round(gst_amount_declared, 2)
+    else:
+        gst_amount_billed = round(base_amount * billed_gst / 100, 2)
+
     calculated_total = round(base_amount + gst_amount_billed, 2)
 
-    reasons = []
+    
+
+    issues = []
     classification_source = "Arithmetic Validation Only"
     expected_gst = billed_gst
     hsn_description = "Not Provided"
 
     code_used = declared_hsn or declared_sac
 
+    # HSN / SAC validation
     if code_used:
         desc, gst_rate = lookup_code(code_used)
 
@@ -136,48 +103,68 @@ def audit_invoice(extracted_fields, pdf_text=""):
             hsn_description = desc
             classification_source = f"Declared Code ({code_used})"
         else:
-            reasons.append(f"Declared code {code_used} not found in Excel master")
+            issues.append({
+                "type": "INFO",
+                "message": f"Code {code_used} not found in master. Basic GST validation applied.",
+                "impact": 0
+            })
 
         if gst_rate is not None:
             expected_gst = gst_rate
-        else:
-            reasons.append(f"No GST rate mapping found for code {code_used}")
 
-    financial_discrepancy = False
-
+    # GST slab validation
     if billed_gst not in valid_slabs:
-        financial_discrepancy = True
-        reasons.append(f"GST {billed_gst}% not valid under {slab_type} regime")
+        issues.append({
+            "type": "CRITICAL",
+            "message": f"GST {billed_gst}% not valid under {slab_type} regime.",
+            "impact": 0
+        })
 
     if code_used and expected_gst != billed_gst:
-        if expected_gst is not None:
-            financial_discrepancy = True
-            reasons.append(
-                f"GST applied {billed_gst}% but mapped rate is {expected_gst}%"
-            )
+        issues.append({
+            "type": "CRITICAL",
+            "message": f"GST applied {billed_gst}% but expected {expected_gst}%.",
+            "impact": 0
+        })
 
+    # Math validation
     if abs(calculated_total - billed_total) > 1:
-        financial_discrepancy = True
-        reasons.append(
-            f"Total mismatch. Expected ₹{calculated_total}, billed ₹{billed_total}"
-        )
+        impact = round(billed_total - calculated_total, 2)
+        issues.append({
+            "type": "CRITICAL",
+            "message": f"Invoice total mismatch. Expected ₹{calculated_total}, billed ₹{billed_total}.",
+            "impact": max(impact, 0)
+        })
 
     overcharge = max(round(billed_total - calculated_total, 2), 0)
 
-    if financial_discrepancy:
-        status = "overcharged"
-    elif reasons:
-        status = "warning"
-    else:
-        status = "correct"
+    # Decision engine
+    critical_exists = any(i["type"] == "CRITICAL" for i in issues)
+    warning_exists = any(i["type"] == "WARNING" for i in issues)
 
-    if not reasons:
-        reason_text = "Invoice is mathematically correct and GST slab valid."
+    if critical_exists and overcharge > 1:
+        status = "FAIL"
+        recommendation = "REJECT"
+    elif critical_exists:
+        status = "FAIL"
+        recommendation = "HOLD"
+    elif warning_exists:
+        status = "WARNING"
+        recommendation = "REVIEW"
     else:
-        reason_text = " | ".join(reasons)
+        status = "PASS"
+        recommendation = "PAY"
+
+    if not issues:
+        issues.append({
+            "type": "INFO",
+            "message": "Invoice passed all validation checks.",
+            "impact": 0
+        })
 
     return {
         "status": status,
+        "recommendation": recommendation,
         "vendor": vendor,
         "invoice_date": invoice_date,
         "slab_regime": slab_type,
@@ -190,9 +177,8 @@ def audit_invoice(extracted_fields, pdf_text=""):
         "billed_gst": billed_gst,
         "expected_gst": expected_gst,
         "billed_rate": billed_rate,
-        "expected_rate": billed_rate,
         "quantity": quantity,
-        "reason": reason_text,
+        "issues": issues,
         "base_amount": base_amount,
         "gst_amount_expected": round(base_amount * expected_gst / 100, 2),
         "gst_amount_billed": gst_amount_billed
