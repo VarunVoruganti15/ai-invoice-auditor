@@ -1,0 +1,177 @@
+<!DOCTYPE html>
+<html lang="en">
+
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover" />
+  <title>AI Invoice Auditor</title>
+  <meta name="description"
+    content="AI-powered invoice auditing — GST compliance, duplicate detection, and financial risk analysis." />
+  <meta name="theme-color" content="#060a12" />
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700;800&display=swap"
+    rel="stylesheet" />
+  <link rel="stylesheet" href="/static/style.css" />
+</head>
+
+<body>
+
+  <!-- Header -->
+  <header class="header">
+    <div class="header-inner">
+      <div class="logo">
+        <span class="logo-icon">🧾</span>
+        <span class="logo-text">Invoice Auditor</span>
+      </div>
+      <span class="header-badge">AI Powered</span>
+    </div>
+  </header>
+
+  <!-- Hero -->
+  <div class="hero">
+    <h1>Audit Invoices with <span>AI Precision</span></h1>
+    <p class="hero-sub">Upload any GST invoice PDF — get instant compliance checks, duplicate detection, and risk
+      scoring.</p>
+  </div>
+
+  <main class="container">
+
+    <!-- Dashboard Stats -->
+    <section class="dashboard" id="dashboard">
+      <div class="stat-card">
+        <span class="stat-icon">📑</span>
+        <div class="stat-label">Audited</div>
+        <div class="stat-value" id="val-total">0</div>
+      </div>
+      <div class="stat-card">
+        <span class="stat-icon">💰</span>
+        <div class="stat-label">Total Billed</div>
+        <div class="stat-value" id="val-billed">₹0</div>
+      </div>
+      <div class="stat-card accent-green">
+        <span class="stat-icon">✅</span>
+        <div class="stat-label">Money Saved</div>
+        <div class="stat-value" id="val-saved">₹0</div>
+      </div>
+      <div class="stat-card accent-red">
+        <span class="stat-icon">❌</span>
+        <div class="stat-label">Failed</div>
+        <div class="stat-value" id="val-fail">0</div>
+      </div>
+      <div class="stat-card accent-yellow">
+        <span class="stat-icon">⚠️</span>
+        <div class="stat-label">Warnings</div>
+        <div class="stat-value" id="val-warn">0</div>
+      </div>
+    </section>
+
+    <!-- Main Grid -->
+    <div class="main-grid">
+
+      <!-- Config + Upload Panel -->
+      <aside class="panel config-panel">
+        <h2 class="panel-title">⚙️ Configuration</h2>
+        <label class="field-label" for="buyer-gstin">Buyer GSTIN</label>
+        <input class="field-input" id="buyer-gstin" type="text" value="27ABCDE1234F1Z5" placeholder="27ABCDE1234F1Z5"
+          autocomplete="off" autocorrect="off" autocapitalize="off" spellcheck="false" />
+
+        <div class="divider"></div>
+
+        <h2 class="panel-title">📂 Upload Invoice PDF</h2>
+
+        <div class="drop-zone" id="drop-zone" role="button" tabindex="0" aria-label="Upload PDF invoice">
+          <span class="drop-icon">📄</span>
+          <div class="drop-text">Tap to upload PDF</div>
+          <div class="drop-sub">or drag &amp; drop here</div>
+          <input type="file" id="file-input" accept=".pdf" hidden />
+        </div>
+
+        <div id="file-name-display" class="file-name-display" style="display:none;">
+          <span>📎</span><span id="file-name-text"></span>
+        </div>
+
+        <!-- Desktop-only buttons (mobile uses sticky bottom bar) -->
+        <button class="btn-primary" id="audit-btn-desktop" disabled>
+          <span id="audit-btn-text-desktop">Audit Invoice</span>
+          <span id="audit-spinner-desktop" class="spinner" style="display:none;"></span>
+        </button>
+        <button class="btn-secondary" id="reset-btn-desktop">🔄 Reset Session</button>
+      </aside>
+
+      <!-- Results Panel -->
+      <section class="panel results-panel" id="results-panel">
+        <div class="empty-state" id="empty-state">
+          <div class="empty-icon">🔍</div>
+          <p>Upload an invoice PDF to begin auditing</p>
+        </div>
+
+        <div id="audit-results" style="display:none;">
+
+          <!-- Extracted Fields -->
+          <div class="result-section">
+            <div class="section-title">📋 Extracted Invoice Data</div>
+            <div class="fields-grid" id="fields-grid"></div>
+          </div>
+
+          <div class="divider"></div>
+
+          <!-- Status Banner -->
+          <div id="status-banner" class="status-banner"></div>
+
+          <!-- Risk Score -->
+          <div class="result-section">
+            <div class="section-title">🎯 Risk Score</div>
+            <div class="risk-bar-track">
+              <div class="risk-bar-fill" id="risk-bar-fill" style="width:0%"></div>
+            </div>
+            <div class="risk-meta">
+              <span class="risk-label" id="risk-label">0 / 100</span>
+              <span class="risk-hint">Higher = riskier</span>
+            </div>
+          </div>
+
+          <div class="divider"></div>
+
+          <!-- Findings -->
+          <div class="result-section">
+            <div class="section-title">🔎 Audit Findings</div>
+            <div id="findings-list"></div>
+          </div>
+
+        </div>
+      </section>
+    </div>
+
+    <!-- History Table -->
+    <section class="panel history-panel" id="history-panel" style="display:none;">
+      <h2 class="panel-title">📜 Invoice History</h2>
+      <div class="table-wrapper">
+        <table class="history-table">
+          <thead>
+            <tr>
+              <th>Invoice #</th>
+              <th>Vendor</th>
+              <th>Amount</th>
+              <th>Status</th>
+            </tr>
+          </thead>
+          <tbody id="history-body"></tbody>
+        </table>
+      </div>
+    </section>
+
+  </main>
+
+  <!-- Mobile Sticky Bottom Bar -->
+  <div class="mobile-bottom-bar">
+    <button class="btn-secondary" id="reset-btn-mobile">🔄</button>
+    <button class="btn-primary" id="audit-btn-mobile" disabled>
+      <span id="audit-btn-text-mobile">Audit Invoice</span>
+      <span id="audit-spinner-mobile" class="spinner" style="display:none;"></span>
+    </button>
+  </div>
+
+  <script src="/static/app.js"></script>
+</body>
+
+</html>

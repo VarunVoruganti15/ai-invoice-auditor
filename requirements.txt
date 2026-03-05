@@ -1,6 +1,8 @@
-streamlit
+fastapi
+uvicorn[standard]
 pdfplumber
 groq
 python-dotenv
 pandas
 openpyxl
+python-multipart
