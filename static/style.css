@@ -365,6 +365,7 @@ body::before {
   outline: none;
   transition: border-color var(--trans), box-shadow var(--trans);
   -webkit-appearance: none;
+  appearance: none;
 }
 
 .field-input:focus {
@@ -483,6 +484,7 @@ body::before {
   box-shadow: 0 4px 20px rgba(79, 142, 247, 0.35);
   letter-spacing: 0.01em;
   -webkit-appearance: none;
+  appearance: none;
   touch-action: manipulation;
 }
 
@@ -515,6 +517,7 @@ body::before {
   cursor: pointer;
   transition: color var(--trans), border-color var(--trans), background var(--trans), transform var(--trans);
   -webkit-appearance: none;
+  appearance: none;
   touch-action: manipulation;
 }
 
@@ -995,4 +998,77 @@ body::before {
       transform: translateY(0);
     }
   }
+}
+
+/* =============================================
+   VENDOR MASTER
+   ============================================= */
+.panel-hint {
+  font-size: 0.75rem;
+  color: var(--text-muted);
+  margin-bottom: 0.75rem;
+  line-height: 1.5;
+}
+
+.panel-hint code {
+  background: rgba(79, 142, 247, 0.1);
+  border: 1px solid rgba(79, 142, 247, 0.2);
+  border-radius: 4px;
+  padding: 0.1rem 0.35rem;
+  font-size: 0.7rem;
+  color: var(--accent);
+  font-family: 'Courier New', monospace;
+}
+
+.vendor-drop-zone {
+  border-color: rgba(20, 184, 166, 0.35);
+  background: rgba(20, 184, 166, 0.03);
+  padding: 1.3rem 1rem;
+}
+
+.vendor-drop-zone:hover,
+.vendor-drop-zone.drag-over {
+  border-color: #14b8a6;
+  background: rgba(20, 184, 166, 0.08);
+  box-shadow: 0 0 28px rgba(20, 184, 166, 0.15);
+}
+
+.vendor-drop-zone::before {
+  background: radial-gradient(ellipse at 50% 0%, rgba(20, 184, 166, 0.1) 0%, transparent 70%);
+}
+
+.vendor-drop-zone .drop-icon {
+  filter: drop-shadow(0 0 10px rgba(20, 184, 166, 0.5));
+  font-size: 1.8rem;
+}
+
+.vendor-status {
+  display: flex;
+  align-items: flex-start;
+  gap: 0.45rem;
+  margin-top: 0.55rem;
+  padding: 0.55rem 0.8rem;
+  border-radius: var(--radius-sm);
+  font-size: 0.8rem;
+  font-weight: 600;
+  line-height: 1.4;
+  animation: fadeIn 0.3s ease;
+}
+
+.vendor-status.vs-loading {
+  background: rgba(79, 142, 247, 0.06);
+  border: 1px solid rgba(79, 142, 247, 0.2);
+  color: var(--accent);
+}
+
+.vendor-status.vs-success {
+  background: rgba(34, 197, 94, 0.08);
+  border: 1px solid rgba(34, 197, 94, 0.25);
+  color: var(--green);
+}
+
+.vendor-status.vs-error {
+  background: var(--red-dim);
+  border: 1px solid var(--red-border);
+  color: #fca5a5;
 }

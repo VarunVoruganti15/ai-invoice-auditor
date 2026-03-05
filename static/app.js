@@ -114,6 +114,74 @@ function setFile(f) {
 }
 
 // =============================================
+// VENDOR MASTER UPLOAD
+// =============================================
+const vendorDropZone = document.getElementById('vendor-drop-zone');
+const vendorFileInput = document.getElementById('vendor-file-input');
+const vendorStatusEl = document.getElementById('vendor-status');
+const vendorStatusIcon = document.getElementById('vendor-status-icon');
+const vendorStatusText = document.getElementById('vendor-status-text');
+
+function setVendorStatus(type, icon, text) {
+  vendorStatusEl.className = `vendor-status vs-${type}`;
+  vendorStatusEl.style.display = 'flex';
+  vendorStatusIcon.textContent = icon;
+  vendorStatusText.textContent = text;
+}
+
+async function uploadVendorCSV(file) {
+  if (!file.name.toLowerCase().endsWith('.csv')) {
+    setVendorStatus('error', '❌', 'Please select a CSV file.');
+    return;
+  }
+  setVendorStatus('loading', '⏳', 'Uploading vendor master…');
+  const fd = new FormData();
+  fd.append('file', file);
+  try {
+    const res = await fetch('/api/upload-vendor-master', { method: 'POST', body: fd });
+    const data = await res.json();
+    if (!res.ok) {
+      setVendorStatus('error', '❌', data.detail || 'Upload failed.');
+    } else {
+      setVendorStatus('success', '✅', `${data.message}`);
+    }
+  } catch (_) {
+    setVendorStatus('error', '❌', 'Network error — try again.');
+  }
+}
+
+vendorDropZone.addEventListener('click', () => vendorFileInput.click());
+vendorDropZone.addEventListener('keydown', (e) => {
+  if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); vendorFileInput.click(); }
+});
+vendorDropZone.addEventListener('dragover', (e) => {
+  e.preventDefault();
+  vendorDropZone.classList.add('drag-over');
+});
+vendorDropZone.addEventListener('dragleave', () => vendorDropZone.classList.remove('drag-over'));
+vendorDropZone.addEventListener('drop', (e) => {
+  e.preventDefault();
+  vendorDropZone.classList.remove('drag-over');
+  const f = e.dataTransfer.files[0];
+  if (f) uploadVendorCSV(f);
+});
+vendorFileInput.addEventListener('change', () => {
+  if (vendorFileInput.files[0]) uploadVendorCSV(vendorFileInput.files[0]);
+});
+
+// Load existing vendor master status on startup
+async function loadVendorMasterStatus() {
+  try {
+    const res = await fetch('/api/vendor-master');
+    if (!res.ok) return;
+    const data = await res.json();
+    if (data.vendor_count > 0) {
+      setVendorStatus('success', '✅', `${data.vendor_count} vendor(s) loaded from default master.`);
+    }
+  } catch (_) { }
+}
+
+// =============================================
 // AUDIT
 // =============================================
 async function runAudit() {
@@ -169,7 +237,7 @@ function renderResults(data) {
   const fieldMap = [
     ['Invoice #', fields.invoice_number || '—'],
     ['Vendor', fields.vendor_name || '—'],
-    ['State', fields.vendor_state || '—'],
+    ['State', result.vendor_state || fields.vendor_state || '—'],
     ['Date', fields.invoice_date || '—'],
     ['GST %', (fields.gst_percent || 0) + '%'],
     ['CGST', fmt(fields.cgst_amount || 0)],
@@ -187,6 +255,20 @@ function renderResults(data) {
       <div class="field-chip-value">${val}</div>
     </div>
   `).join('');
+
+  // Vendor master match badge
+  const existingBadge = document.getElementById('vendor-match-badge');
+  if (existingBadge) existingBadge.remove();
+  if (result.vendor_master_matched) {
+    const method = result.vendor_match_method === 'GSTIN' ? 'matched by GSTIN ✔' : 'matched by name ✔';
+    const badge = document.createElement('div');
+    badge.id = 'vendor-match-badge';
+    badge.className = 'finding finding-info';
+    badge.style.marginBottom = '0.8rem';
+    badge.innerHTML = `<span class="finding-icon">🏢</span>Vendor ${method} in Vendor Master${result.vendor_payment_terms ? ` — Payment Terms: <strong>${result.vendor_payment_terms}</strong>` : ''
+      }`;
+    document.getElementById('fields-grid').after(badge);
+  }
 
   // Status banner
   const bannerEl = document.getElementById('status-banner');
@@ -253,3 +335,4 @@ resetBtns.forEach(id => {
 // INIT
 // =============================================
 loadDashboard();
+loadVendorMasterStatus();

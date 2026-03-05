@@ -32,6 +32,45 @@ app.add_middleware(
 invoice_history: list = []
 money_saved: float = 0.0
 
+# In-memory vendor master store: two indexes for GSTIN-first, then name fallback
+vendor_master_data: dict = {"by_gstin": {}, "by_name": {}}
+
+
+def parse_vendor_csv_to_master(df: pd.DataFrame) -> dict:
+    """Build GSTIN-keyed and name-keyed lookup dicts from a vendor master DataFrame."""
+    df.columns = [c.strip().lower() for c in df.columns]
+    by_gstin: dict = {}
+    by_name: dict = {}
+    for _, row in df.iterrows():
+        record = {
+            "vendor_name": str(row.get("vendor_name", "")),
+            "gstin": str(row.get("gstin", "")),
+            "state": str(row.get("state", "")),
+            "payment_terms": str(row.get("payment_terms", "")),
+        }
+        gstin_key = record["gstin"].strip()
+        name_key = record["vendor_name"].lower().strip()
+        if gstin_key:
+            by_gstin[gstin_key] = record
+        if name_key:
+            by_name[name_key] = record
+    return {"by_gstin": by_gstin, "by_name": by_name}
+
+
+def load_default_vendor_master():
+    """Load the default vendor_master.csv from the data directory on startup."""
+    global vendor_master_data
+    csv_path = os.path.join(os.path.dirname(__file__), "data", "vendor_master.csv")
+    if os.path.exists(csv_path):
+        try:
+            df = pd.read_csv(csv_path)
+            vendor_master_data = parse_vendor_csv_to_master(df)
+        except Exception:
+            pass
+
+
+load_default_vendor_master()
+
 static_dir = os.path.join(os.path.dirname(__file__), "static")
 app.mount("/static", StaticFiles(directory=static_dir), name="static")
 
@@ -79,7 +118,7 @@ async def audit(
     fields = extract_invoice_fields(pdf_text)
 
     # Step 3 — Core audit
-    result = audit_invoice(fields, buyer_gstin)
+    result = audit_invoice(fields, buyer_gstin, vendor_master_data)
 
     invoice_number = fields.get("invoice_number", "")
     vendor = result.get("vendor", "")
@@ -154,3 +193,49 @@ def reset_session():
     invoice_history = []
     money_saved = 0.0
     return {"message": "Session reset."}
+
+
+@app.post("/api/upload-vendor-master")
+async def upload_vendor_master(file: UploadFile = File(...)):
+    """Accept a CSV file and replace the in-memory vendor master."""
+    global vendor_master_data
+
+    filename = file.filename.lower()
+    if not (filename.endswith(".csv")):
+        raise HTTPException(status_code=400, detail="Only CSV files are supported.")
+
+    contents = await file.read()
+    try:
+        df = pd.read_csv(io.BytesIO(contents))
+    except Exception as e:
+        raise HTTPException(status_code=422, detail=f"Could not parse CSV: {e}")
+
+    # Normalise column names
+    df.columns = [c.strip().lower() for c in df.columns]
+    required = {"vendor_name", "gstin", "state"}
+    missing = required - set(df.columns)
+    if missing:
+        raise HTTPException(
+            status_code=422,
+            detail=f"CSV missing required columns: {', '.join(missing)}"
+        )
+
+    new_master = parse_vendor_csv_to_master(df)
+    vendor_master_data.update(new_master)
+
+    count = len(new_master["by_name"])
+    return {
+        "message": f"Vendor master loaded successfully. {count} vendors registered.",
+        "vendor_count": count,
+        "vendors": list(new_master["by_name"].keys()),
+    }
+
+
+@app.get("/api/vendor-master")
+def get_vendor_master():
+    """Return the current vendor master list."""
+    vendors = list(vendor_master_data.get("by_name", {}).values())
+    return {
+        "vendor_count": len(vendors),
+        "vendors": vendors,
+    }

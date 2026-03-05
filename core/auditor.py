@@ -68,13 +68,46 @@ def get_valid_slabs(invoice_date):
         return old_slabs, "OLD"
 
 
-def audit_invoice(extracted_fields, buyer_gstin):
+def audit_invoice(extracted_fields, buyer_gstin, vendor_master: dict = None):
 
     vendor = extracted_fields.get("vendor_name", "")
     invoice_date = extracted_fields.get("invoice_date", "")
 
     buyer_state = get_state_from_gstin(buyer_gstin)
     vendor_state = extracted_fields.get("vendor_state", "").strip()
+
+    # --- Vendor Master Lookup (Priority 1: GSTIN, Priority 2: Name) ---
+    vendor_master_record = None
+    vendor_master_matched = False
+    match_method = None
+
+    if vendor_master:
+        by_gstin = vendor_master.get("by_gstin", {})
+        by_name = vendor_master.get("by_name", {})
+
+        # Extract vendor GSTIN from invoice fields for matching
+        invoice_vendor_gstin = extracted_fields.get("vendor_gstin", "").strip()
+
+        # Priority 1 — Match by GSTIN (most reliable)
+        if invoice_vendor_gstin and invoice_vendor_gstin in by_gstin:
+            vendor_master_record = by_gstin[invoice_vendor_gstin]
+            vendor_master_matched = True
+            match_method = "GSTIN"
+        else:
+            # Priority 2 — Fallback: match by vendor name
+            name_key = vendor.lower().strip()
+            if name_key in by_name:
+                vendor_master_record = by_name[name_key]
+                vendor_master_matched = True
+                match_method = "name"
+
+        if vendor_master_record:
+            # Override with authoritative master state
+            if vendor_master_record.get("state"):
+                vendor_state = vendor_master_record["state"].strip()
+            # Derive state from master GSTIN if state field is blank
+            if not vendor_state and vendor_master_record.get("gstin"):
+                vendor_state = get_state_from_gstin(vendor_master_record["gstin"])
 
     billed_total = safe_float(extracted_fields.get("invoice_total"))
     taxable_amount = safe_float(extracted_fields.get("taxable_amount"))
@@ -165,8 +198,20 @@ def audit_invoice(extracted_fields, buyer_gstin):
 
     overcharge = max(round(billed_total - calculated_total, 2), 0)
 
+    # -----------------------------
+    # VENDOR MASTER VALIDATION
+    # -----------------------------
+    if vendor_master and not vendor_master_matched:
+        issues.append({
+            "type": "WARNING",
+            "message": f"Vendor '{vendor}' not found in the uploaded Vendor Master. State/GSTIN from invoice used.",
+            "impact": 0
+        })
+
     status = "FAIL" if any(i["type"] == "CRITICAL" for i in issues) else "PASS"
-    recommendation = "REJECT" if status == "FAIL" else "PAY"
+    if status == "PASS" and any(i["type"] == "WARNING" for i in issues):
+        status = "WARNING"
+    recommendation = "REJECT" if status == "FAIL" else ("REVIEW" if status == "WARNING" else "PAY")
 
     if not issues:
         issues.append({
@@ -186,5 +231,8 @@ def audit_invoice(extracted_fields, buyer_gstin):
         "expected_total": calculated_total,
         "overcharge": overcharge,
         "issues": issues,
-        "base_amount": base_amount
+        "base_amount": base_amount,
+        "vendor_master_matched": vendor_master_matched,
+        "vendor_match_method": match_method,
+        "vendor_payment_terms": vendor_master_record.get("payment_terms", "") if vendor_master_record else "",
     }

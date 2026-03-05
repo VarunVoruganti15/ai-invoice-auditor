@@ -77,6 +77,25 @@
 
         <div class="divider"></div>
 
+        <h2 class="panel-title">🏢 Vendor Master</h2>
+        <p class="panel-hint">Upload your company's vendor list CSV for reliable GST validation. Required columns:
+          <code>vendor_name, gstin, state</code>.</p>
+
+        <div class="drop-zone vendor-drop-zone" id="vendor-drop-zone" role="button" tabindex="0"
+          aria-label="Upload vendor master CSV">
+          <span class="drop-icon">📊</span>
+          <div class="drop-text">Tap to upload Vendor CSV</div>
+          <div class="drop-sub">vendor_name, gstin, state, payment_terms</div>
+          <input type="file" id="vendor-file-input" accept=".csv" hidden />
+        </div>
+
+        <div id="vendor-status" class="vendor-status" style="display:none;">
+          <span id="vendor-status-icon"></span>
+          <span id="vendor-status-text"></span>
+        </div>
+
+        <div class="divider"></div>
+
         <h2 class="panel-title">📂 Upload Invoice PDF</h2>
 
         <div class="drop-zone" id="drop-zone" role="button" tabindex="0" aria-label="Upload PDF invoice">
